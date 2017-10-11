@@ -23,18 +23,7 @@
 #include "utils.h"
 
 #include <FLAC/export.h>
-
-#ifdef FLAC_API_VERSION_CURRENT
-/* flac 1.1.3 */
-#define FLAC_NEW_API 1
-#endif
-
-#ifdef FLAC_NEW_API
 #include <FLAC/stream_decoder.h>
-#else
-#include <FLAC/seekable_stream_decoder.h>
-#endif
-
 #include <FLAC/metadata.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -48,17 +37,10 @@
 /* Reduce typing.  Namespaces are nice but FLAC API is fscking ridiculous.  */
 
 /* functions, types, enums */
-#ifdef FLAC_NEW_API
 #define F(s) FLAC__stream_decoder_ ## s
 #define T(s) FLAC__StreamDecoder ## s
 #define Dec FLAC__StreamDecoder
 #define E(s) FLAC__STREAM_DECODER_ ## s
-#else
-#define F(s) FLAC__seekable_stream_decoder_ ## s
-#define T(s) FLAC__SeekableStreamDecoder ## s
-#define Dec FLAC__SeekableStreamDecoder
-#define E(s) FLAC__SEEKABLE_STREAM_DECODER_ ## s
-#endif
 
 struct flac_private {
 	/* file/stream position and length */
@@ -76,15 +58,9 @@ struct flac_private {
 	struct keyval *comments;
 	double duration;
 	long bitrate;
-
-	unsigned int ignore_next_write : 1;
 };
 
-#ifdef FLAC_NEW_API
 static T(ReadStatus) read_cb(const Dec *dec, unsigned char *buf, size_t *size, void *data)
-#else
-static T(ReadStatus) read_cb(const Dec *dec, unsigned char *buf, unsigned *size, void *data)
-#endif
 {
 	struct input_plugin_data *ip_data = data;
 	struct flac_private *priv = ip_data->private;
@@ -92,18 +68,10 @@ static T(ReadStatus) read_cb(const Dec *dec, unsigned char *buf, unsigned *size,
 
 	if (priv->pos == priv->len) {
 		*size = 0;
-#ifdef FLAC_NEW_API
 		return E(READ_STATUS_END_OF_STREAM);
-#else
-		return E(READ_STATUS_OK);
-#endif
 	}
 	if (*size == 0)
-#ifdef FLAC_NEW_API
 		return E(READ_STATUS_CONTINUE);
-#else
-		return E(READ_STATUS_OK);
-#endif
 
 	rc = read(ip_data->fd, buf, *size);
 	if (rc == -1) {
@@ -111,34 +79,18 @@ static T(ReadStatus) read_cb(const Dec *dec, unsigned char *buf, unsigned *size,
 		if (errno == EINTR || errno == EAGAIN) {
 			/* FIXME: not sure how the flac decoder handles this */
 			d_print("interrupted\n");
-#ifdef FLAC_NEW_API
 			return E(READ_STATUS_CONTINUE);
-#else
-			return E(READ_STATUS_OK);
-#endif
 		}
-#ifdef FLAC_NEW_API
 		return E(READ_STATUS_ABORT);
-#else
-		return E(READ_STATUS_ERROR);
-#endif
 	}
 
 	priv->pos += rc;
 	*size = rc;
 	if (rc == 0) {
 		/* should not happen */
-#ifdef FLAC_NEW_API
 		return E(READ_STATUS_END_OF_STREAM);
-#else
-		return E(READ_STATUS_OK);
-#endif
 	}
-#ifdef FLAC_NEW_API
 	return E(READ_STATUS_CONTINUE);
-#else
-	return E(READ_STATUS_OK);
-#endif
 }
 
 static T(SeekStatus) seek_cb(const Dec *dec, uint64_t offset, void *data)
@@ -190,12 +142,10 @@ static int eof_cb(const Dec *dec, void *data)
 
 #if defined(WORDS_BIGENDIAN)
 
-#define LE16(x) swap_uint16(x)
 #define LE32(x) swap_uint32(x)
 
 #else
 
-#define LE16(x)	(x)
 #define LE32(x)	(x)
 
 #endif
@@ -206,16 +156,8 @@ static FLAC__StreamDecoderWriteStatus write_cb(const Dec *dec, const FLAC__Frame
 	struct input_plugin_data *ip_data = data;
 	struct flac_private *priv = ip_data->private;
 	int frames, bytes, size, channels, bits, depth;
-	int ch, nch, i, j = 0;
-
-	if (ip_data->sf == 0) {
-		return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
-	}
-
-	if (priv->ignore_next_write) {
-		priv->ignore_next_write = 0;
-		return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
-	}
+	int ch, nch, i = 0;
+	char *dest; int32_t src;
 
 	frames = frame->header.blocksize;
 	channels = sf_get_channels(ip_data->sf);
@@ -235,50 +177,13 @@ static FLAC__StreamDecoderWriteStatus write_cb(const Dec *dec, const FLAC__Frame
 	if (!depth)
 		depth = bits;
 	nch = frame->header.channels;
-	if (depth == 8) {
-		char *b = priv->buf + priv->buf_wpos;
-
-		for (i = 0; i < frames; i++) {
-			for (ch = 0; ch < channels; ch++)
-				b[j++] = buf[ch % nch][i];
+	dest = priv->buf + priv->buf_wpos;
+	for (i = 0; i < frames; i++) {
+		for (ch = 0; ch < channels; ch++) {
+			src = LE32(buf[ch % nch][i] << (bits -depth));
+			memcpy(dest, &src, bits / 8);
+			dest += bits / 8;
 		}
-	} else if (depth == 16) {
-		int16_t *b = (void *)(priv->buf + priv->buf_wpos);
-
-		for (i = 0; i < frames; i++) {
-			for (ch = 0; ch < channels; ch++)
-				b[j++] = LE16(buf[ch % nch][i]);
-		}
-	} else if (depth == 32) {
-		int32_t *b = (void *)(priv->buf + priv->buf_wpos);
-
-		for (i = 0; i < frames; i++) {
-			for (ch = 0; ch < channels; ch++)
-				b[j++] = LE32(buf[ch % nch][i]);
-		}
-	} else if (depth == 12) { /* -> 16 */
-		int16_t *b = (void *)(priv->buf + priv->buf_wpos);
-
-		for (i = 0; i < frames; i++) {
-			for (ch = 0; ch < channels; ch++)
-				b[j++] = LE16(buf[ch % nch][i] << 4);
-		}
-	} else if (depth == 20) { /* -> 32 */
-		int32_t *b = (void *)(priv->buf + priv->buf_wpos);
-
-		for (i = 0; i < frames; i++) {
-			for (ch = 0; ch < channels; ch++)
-				b[j++] = LE32(buf[ch % nch][i] << 12);
-		}
-	} else if (depth == 24) { /* -> 32 */
-		int32_t *b = (void *)(priv->buf + priv->buf_wpos);
-
-		for (i = 0; i < frames; i++) {
-			for (ch = 0; ch < channels; ch++)
-				b[j++] = LE32(buf[ch % nch][i] << 8);
-		}
-	} else {
-		d_print("bits per sample changed to %d\n", depth);
 	}
 
 	priv->buf_wpos += bytes;
@@ -304,15 +209,17 @@ static void metadata_cb(const Dec *dec, const FLAC__StreamMetadata *metadata, vo
 
 			switch (si->bits_per_sample) {
 			case 8:
-			case 16:
-			case 32:
-				bits = si->bits_per_sample;
+				bits = 8;
 				break;
 			case 12:
+			case 16:
 				bits = 16;
 				break;
 			case 20:
 			case 24:
+				bits = 24;
+				break;
+			case 32:
 				bits = 32;
 				break;
 			}
@@ -424,29 +331,10 @@ static int flac_open(struct input_plugin_data *ip_data)
 	}
 	ip_data->private = priv;
 
-#ifndef FLAC_NEW_API
-	F(set_read_callback)(dec, read_cb);
-	F(set_seek_callback)(dec, seek_cb);
-	F(set_tell_callback)(dec, tell_cb);
-	F(set_length_callback)(dec, length_cb);
-	F(set_eof_callback)(dec, eof_cb);
-	F(set_write_callback)(dec, write_cb);
-	F(set_metadata_callback)(dec, metadata_cb);
-	F(set_error_callback)(dec, error_cb);
-	F(set_client_data)(dec, ip_data);
-#endif
-
-#ifdef FLAC_NEW_API
 	FLAC__stream_decoder_set_metadata_respond_all(dec);
 	if (FLAC__stream_decoder_init_stream(dec, read_cb, seek_cb, tell_cb,
 				length_cb, eof_cb, write_cb, metadata_cb,
 				error_cb, ip_data) != E(INIT_STATUS_OK)) {
-#else
-	/* FLAC__METADATA_TYPE_STREAMINFO already accepted */
-	F(set_metadata_respond)(dec, FLAC__METADATA_TYPE_VORBIS_COMMENT);
-
-	if (F(init)(dec) != E(OK)) {
-#endif
 		int save = errno;
 
 		d_print("init failed\n");
@@ -458,11 +346,9 @@ static int flac_open(struct input_plugin_data *ip_data)
 	}
 
 	ip_data->sf = 0;
-	while (priv->buf_wpos == 0 && priv->pos < priv->len) {
-		if (!F(process_single)(priv->dec)) {
-			free_priv(ip_data);
-			return -IP_ERROR_ERRNO;
-		}
+	if (!F(process_until_end_of_metadata)(priv->dec)) {
+		free_priv(ip_data);
+		return -IP_ERROR_ERRNO;
 	}
 
 	if (!ip_data->sf) {
@@ -498,9 +384,11 @@ static int flac_read(struct input_plugin_data *ip_data, char *buffer, int count)
 		BUG_ON(avail < 0);
 		if (avail > 0)
 			break;
-		if (priv->pos == priv->len)
+		FLAC__bool internal_error = !F(process_single)(priv->dec);
+		FLAC__StreamDecoderState state = F(get_state)(priv->dec);
+		if (state == E(END_OF_STREAM))
 			return 0;
-		if (!F(process_single)(priv->dec)) {
+		if (state == E(ABORTED) || state == E(OGG_ERROR) || internal_error) {
 			d_print("process_single failed\n");
 			return -1;
 		}
@@ -518,21 +406,23 @@ static int flac_read(struct input_plugin_data *ip_data, char *buffer, int count)
 }
 
 /* Flush the input and seek to an absolute sample. Decoding will resume at the
- * given sample. Note that because of this, the next write callback may contain
- * a partial block.
+ * given sample.
  */
 static int flac_seek(struct input_plugin_data *ip_data, double offset)
 {
 	struct flac_private *priv = ip_data->private;
+	priv->buf_rpos = 0;
+	priv->buf_wpos = 0;
 	uint64_t sample;
 
 	sample = (uint64_t)(offset * (double)sf_get_rate(ip_data->sf) + 0.5);
 	if (!F(seek_absolute)(priv->dec, sample)) {
+		if (F(get_state(priv->dec)) == FLAC__STREAM_DECODER_SEEK_ERROR) {
+			if (!F(flush)(priv->dec))
+				d_print("failed to flush\n");
+		}
 		return -IP_ERROR_ERRNO;
 	}
-	priv->ignore_next_write = 1;
-	priv->buf_rpos = 0;
-	priv->buf_wpos = 0;
 	return 0;
 }
 

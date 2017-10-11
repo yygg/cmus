@@ -23,7 +23,7 @@
 
 #define OPTION_MAX_SIZE	4096
 
-typedef void (*opt_get_cb)(void *data, char *buf);
+typedef void (*opt_get_cb)(void *data, char *buf, size_t size);
 typedef void (*opt_set_cb)(void *data, const char *buf);
 typedef void (*opt_toggle_cb)(void *data);
 
@@ -94,6 +94,9 @@ enum {
 	COLOR_WIN_SEL_FG,
 	COLOR_WIN_TITLE_BG,
 	COLOR_WIN_TITLE_FG,
+	COLOR_TRACKWIN_ALBUM_BG,
+
+	COLOR_TRACKWIN_ALBUM_FG,
 	NR_COLORS
 };
 
@@ -108,6 +111,7 @@ enum {
 	COLOR_WIN_INACTIVE_SEL_ATTR,
 	COLOR_WIN_SEL_ATTR,
 	COLOR_WIN_TITLE_ATTR,
+	COLOR_TRACKWIN_ALBUM_ATTR,
 	NR_ATTRS
 };
 
@@ -141,6 +145,8 @@ extern int rewind_offset;
 extern int skip_track_info;
 extern int mouse;
 extern int mpris;
+extern int time_show_leading_zero;
+extern int start_view;
 
 extern const char * const aaa_mode_names[];
 extern const char * const view_names[NR_VIEWS + 1];

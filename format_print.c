@@ -140,7 +140,8 @@ static void print_time(int t)
 	stack[p++] = s / 10 + '0';
 	stack[p++] = ':';
 	stack[p++] = m % 10 + '0';
-	stack[p++] = m / 10 + '0';
+	if (m / 10 || h || time_show_leading_zero)
+		stack[p++] = m / 10 + '0';
 	if (h) {
 		stack[p++] = ':';
 		do {
@@ -259,7 +260,7 @@ static const char *str_val(const char *key, const struct format_option *fopts, c
 	} else {
 		opt = option_find_silent(key);
 		if (opt) {
-			opt->get(opt->data, buf);
+			opt->get(opt->data, buf, OPTION_MAX_SIZE);
 			val = buf;
 		}
 	}
@@ -287,8 +288,6 @@ static int format_eval_cond(struct expr* expr, const struct format_option *fopts
 	const char *key;
 	const struct format_option *fo;
 	const struct cmus_opt *opt;
-	/* FIXME:
-	 * it can be overflowed in theory, but we can't find out option's size */
 	char buf[OPTION_MAX_SIZE];
 
 	if (expr->left) {
@@ -361,7 +360,7 @@ static int format_eval_cond(struct expr* expr, const struct format_option *fopts
 		return !fo->empty;
 	opt = option_find_silent(key);
 	if (opt) {
-		opt->get(opt->data, buf);
+		opt->get(opt->data, buf, OPTION_MAX_SIZE);
 		if (strcmp(buf, "false") != 0 && strlen(buf) != 0)
 			return 1;
 	}
@@ -380,7 +379,7 @@ static struct expr *format_parse_cond(const char* format, int size)
 static uchar format_skip_cond_expr(const char *format, int *s)
 {
 	uchar r = 0;
-	while (*format) {
+	while (format[*s]) {
 		uchar u = u_get_char(format, s);
 		if (u == '}' || u == '?') {
 			return u;

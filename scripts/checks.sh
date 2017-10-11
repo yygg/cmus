@@ -172,7 +172,7 @@ check_cc()
 	check_program $CC || return 1
 
 	cc_cxx_common
-	CFLAGS="$CFLAGS $common_cf"
+	CFLAGS="$CFLAGS -I$(pwd) $common_cf"
 	LDFLAGS="$LDFLAGS $common_lf"
 
 	makefile_vars CC LD CFLAGS LDFLAGS
@@ -639,12 +639,6 @@ check_x11()
 # adds PTHREAD_CFLAGS and PTHREAD_LIBS to config.mk
 check_pthread()
 {
-	case `uname -s` in
-	OpenBSD)
-		PTHREAD_LIBS="$PTHREAD_LIBS -pthread"
-		;;
-	esac
-
 	for __libs in "$PTHREAD_LIBS" -lpthread -lc_r -lkse
 	do
 		test -z "$__libs" && continue

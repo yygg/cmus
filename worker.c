@@ -21,25 +21,33 @@
 #include "list.h"
 #include "xmalloc.h"
 #include "debug.h"
+#include "job.h"
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <pthread.h>
 
 struct worker_job {
 	struct list_head node;
-	/* >0, 0 is 'any' */
-	int type;
+
+	uint32_t type;
 	void (*job_cb)(void *data);
 	void (*free_cb)(void *data);
 	void *data;
+};
+
+enum worker_state {
+	WORKER_PAUSED,
+	WORKER_RUNNING,
+	WORKER_STOPPED,
 };
 
 static LIST_HEAD(worker_job_head);
 static pthread_mutex_t worker_mutex = CMUS_MUTEX_INITIALIZER;
 static pthread_cond_t worker_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t worker_thread;
-static int running = 1;
-static int cancel_type = JOB_TYPE_NONE;
+static enum worker_state state = WORKER_PAUSED;
+static int cancel_current = 0;
 
 /*
  * - only worker thread modifies this
@@ -57,10 +65,10 @@ static void *worker_loop(void *arg)
 
 	worker_lock();
 	while (1) {
-		if (list_empty(&worker_job_head)) {
+		if (state != WORKER_RUNNING || list_empty(&worker_job_head)) {
 			int rc;
 
-			if (!running)
+			if (state == WORKER_STOPPED)
 				break;
 
 			rc = pthread_cond_wait(&worker_cond, &worker_mutex);
@@ -83,9 +91,11 @@ static void *worker_loop(void *arg)
 			free(cur_job);
 			cur_job = NULL;
 
-			// wakeup worker_remove_jobs() if needed
-			if (cancel_type != JOB_TYPE_NONE)
+			// wakeup worker_remove_jobs_*() if needed
+			if (cancel_current) {
+				cancel_current = 0;
 				pthread_cond_signal(&worker_cond);
+			}
 		}
 	}
 	worker_unlock();
@@ -99,17 +109,26 @@ void worker_init(void)
 	BUG_ON(rc);
 }
 
-void worker_exit(void)
+static void worker_set_state(enum worker_state s)
 {
 	worker_lock();
-	running = 0;
+	state = s;
 	pthread_cond_signal(&worker_cond);
 	worker_unlock();
+}
 
+void worker_start(void)
+{
+	worker_set_state(WORKER_RUNNING);
+}
+
+void worker_exit(void)
+{
+	worker_set_state(WORKER_STOPPED);
 	pthread_join(worker_thread, NULL);
 }
 
-void worker_add_job(int type, void (*job_cb)(void *data),
+void worker_add_job(uint32_t type, void (*job_cb)(void *data),
 		void (*free_cb)(void *data), void *data)
 {
 	struct worker_job *job;
@@ -126,20 +145,31 @@ void worker_add_job(int type, void (*job_cb)(void *data),
 	worker_unlock();
 }
 
-void worker_remove_jobs(int type)
+static int worker_matches_type(uint32_t type, void *job_data,
+		void *opaque)
+{
+	uint32_t *pat = opaque;
+	return !!(type & *pat);
+}
+
+void worker_remove_jobs_by_type(uint32_t pat)
+{
+	worker_remove_jobs_by_cb(worker_matches_type, &pat);
+}
+
+void worker_remove_jobs_by_cb(worker_match_cb cb, void *opaque)
 {
 	struct list_head *item;
 
 	worker_lock();
-	cancel_type = type;
 
-	/* remove jobs of the specified type from the queue */
 	item = worker_job_head.next;
 	while (item != &worker_job_head) {
-		struct worker_job *job = container_of(item, struct worker_job, node);
+		struct worker_job *job = container_of(item, struct worker_job,
+				node);
 		struct list_head *next = item->next;
 
-		if (type == JOB_TYPE_ANY || type == job->type) {
+		if (cb(job->type, job->data, opaque)) {
 			list_del(&job->node);
 			job->free_cb(job->data);
 			free(job);
@@ -148,26 +178,33 @@ void worker_remove_jobs(int type)
 	}
 
 	/* wait current job to finish or cancel if it's of the specified type */
-	if (cur_job && (type == JOB_TYPE_ANY || type == cur_job->type))
-		pthread_cond_wait(&worker_cond, &worker_mutex);
+	if (cur_job && cb(cur_job->type, cur_job->data, opaque)) {
+		cancel_current = 1;
+		while (cancel_current)
+			pthread_cond_wait(&worker_cond, &worker_mutex);
+	}
 
-	cancel_type = JOB_TYPE_NONE;
 	worker_unlock();
 }
 
-int worker_has_job(int type)
+int worker_has_job_by_type(uint32_t pat)
+{
+	return worker_has_job_by_cb(worker_matches_type, &pat);
+}
+
+int worker_has_job_by_cb(worker_match_cb cb, void *opaque)
 {
 	struct worker_job *job;
 	int has_job = 0;
 
 	worker_lock();
 	list_for_each_entry(job, &worker_job_head, node) {
-		if (type == JOB_TYPE_ANY || type == job->type) {
+		if (cb(job->type, job->data, opaque)) {
 			has_job = 1;
 			break;
 		}
 	}
-	if (cur_job && (type == JOB_TYPE_ANY || type == cur_job->type))
+	if (cur_job && cb(job->type, job->data, opaque))
 		has_job = 1;
 	worker_unlock();
 	return has_job;
@@ -179,5 +216,5 @@ int worker_has_job(int type)
  */
 int worker_cancelling(void)
 {
-	return cur_job->type == cancel_type || cancel_type == JOB_TYPE_ANY;
+	return cancel_current;
 }

@@ -25,40 +25,40 @@
 #include "utils.h"
 #include "debug.h"
 #include "path.h"
+#include "ui_curses.h"
 
 #include <string.h>
+#include <stdatomic.h>
 #include <math.h>
 
-static void track_info_free(struct track_info *ti)
+struct track_info_priv {
+	struct track_info ti;
+	_Atomic uint32_t ref_count;
+};
+
+static struct track_info_priv *track_info_to_priv(struct track_info *ti)
 {
-	keyvals_free(ti->comments);
-	free(ti->filename);
-	free(ti->codec);
-	free(ti->codec_profile);
-	free(ti->collkey_artist);
-	free(ti->collkey_album);
-	free(ti->collkey_title);
-	free(ti->collkey_genre);
-	free(ti->collkey_comment);
-	free(ti->collkey_albumartist);
-	free(ti);
+	return container_of(ti, struct track_info_priv, ti);
 }
 
 struct track_info *track_info_new(const char *filename)
 {
-	static uint64_t cur_uid = 0;
-	cur_uid++;
+	static _Atomic uint64_t cur_uid = ATOMIC_VAR_INIT(1);
+	uint64_t uid = atomic_fetch_add_explicit(&cur_uid, 1, memory_order_relaxed);
+	BUG_ON(uid == 0);
 
-	struct track_info *ti;
-	ti = xnew(struct track_info, 1);
-	ti->uid = cur_uid;
+	struct track_info_priv *priv = xnew(struct track_info_priv, 1);
+	atomic_init(&priv->ref_count, 1);
+
+	struct track_info *ti = &priv->ti;
+	ti->uid = uid;
 	ti->filename = xstrdup(filename);
-	ti->ref = 1;
 	ti->play_count = 0;
 	ti->comments = NULL;
 	ti->bpm = -1;
 	ti->codec = NULL;
 	ti->codec_profile = NULL;
+
 	return ti;
 }
 
@@ -109,16 +109,34 @@ void track_info_set_comments(struct track_info *ti, struct keyval *comments) {
 
 void track_info_ref(struct track_info *ti)
 {
-	BUG_ON(ti->ref < 1);
-	ti->ref++;
+	struct track_info_priv *priv = track_info_to_priv(ti);
+	atomic_fetch_add_explicit(&priv->ref_count, 1, memory_order_relaxed);
 }
 
 void track_info_unref(struct track_info *ti)
 {
-	BUG_ON(ti->ref < 1);
-	ti->ref--;
-	if (ti->ref == 0)
-		track_info_free(ti);
+	struct track_info_priv *priv = track_info_to_priv(ti);
+	uint32_t prev = atomic_fetch_sub_explicit(&priv->ref_count, 1,
+			memory_order_acq_rel);
+	if (prev == 1) {
+		keyvals_free(ti->comments);
+		free(ti->filename);
+		free(ti->codec);
+		free(ti->codec_profile);
+		free(ti->collkey_artist);
+		free(ti->collkey_album);
+		free(ti->collkey_title);
+		free(ti->collkey_genre);
+		free(ti->collkey_comment);
+		free(ti->collkey_albumartist);
+		free(priv);
+	}
+}
+
+bool track_info_unique_ref(struct track_info *ti)
+{
+	struct track_info_priv *priv = track_info_to_priv(ti);
+	return atomic_load_explicit(&priv->ref_count, memory_order_relaxed) == 1;
 }
 
 int track_info_has_tag(const struct track_info *ti)
@@ -244,4 +262,136 @@ int track_info_cmp(const struct track_info *a, const struct track_info *b, const
 			break;
 	}
 	return rev ? -res : res;
+}
+
+static const struct {
+	const char *str;
+	sort_key_t key;
+} sort_key_map[] = {
+	{ "artist",		SORT_ARTIST		},
+	{ "album",		SORT_ALBUM		},
+	{ "title",		SORT_TITLE		},
+	{ "play_count",		SORT_PLAY_COUNT		},
+	{ "tracknumber",	SORT_TRACKNUMBER	},
+	{ "discnumber",		SORT_DISCNUMBER		},
+	{ "date",		SORT_DATE		},
+	{ "originaldate",	SORT_ORIGINALDATE	},
+	{ "genre",		SORT_GENRE		},
+	{ "comment",		SORT_COMMENT		},
+	{ "albumartist",	SORT_ALBUMARTIST	},
+	{ "filename",		SORT_FILENAME		},
+	{ "filemtime",		SORT_FILEMTIME		},
+	{ "rg_track_gain",	SORT_RG_TRACK_GAIN	},
+	{ "rg_track_peak",	SORT_RG_TRACK_PEAK	},
+	{ "rg_album_gain",	SORT_RG_ALBUM_GAIN	},
+	{ "rg_album_peak",	SORT_RG_ALBUM_PEAK	},
+	{ "bitrate",		SORT_BITRATE		},
+	{ "codec",		SORT_CODEC		},
+	{ "codec_profile",	SORT_CODEC_PROFILE	},
+	{ "media",		SORT_MEDIA		},
+	{ "bpm",		SORT_BPM		},
+	{ "-artist",		REV_SORT_ARTIST		},
+	{ "-album",		REV_SORT_ALBUM		},
+	{ "-title",		REV_SORT_TITLE		},
+	{ "-play_count", 	REV_SORT_PLAY_COUNT	},
+	{ "-tracknumber",	REV_SORT_TRACKNUMBER	},
+	{ "-discnumber",	REV_SORT_DISCNUMBER	},
+	{ "-date",		REV_SORT_DATE		},
+	{ "-originaldate",	REV_SORT_ORIGINALDATE	},
+	{ "-genre",		REV_SORT_GENRE		},
+	{ "-comment",		REV_SORT_COMMENT	},
+	{ "-albumartist",	REV_SORT_ALBUMARTIST	},
+	{ "-filename",		REV_SORT_FILENAME	},
+	{ "-filemtime",		REV_SORT_FILEMTIME	},
+	{ "-rg_track_gain",	REV_SORT_RG_TRACK_GAIN	},
+	{ "-rg_track_peak",	REV_SORT_RG_TRACK_PEAK	},
+	{ "-rg_album_gain",	REV_SORT_RG_ALBUM_GAIN	},
+	{ "-rg_album_peak",	REV_SORT_RG_ALBUM_PEAK	},
+	{ "-bitrate",		REV_SORT_BITRATE	},
+	{ "-codec",		REV_SORT_CODEC		},
+	{ "-codec_profile",	REV_SORT_CODEC_PROFILE	},
+	{ "-media",		REV_SORT_MEDIA		},
+	{ "-bpm",		REV_SORT_BPM		},
+	{ NULL,                 SORT_INVALID            }
+};
+
+sort_key_t *parse_sort_keys(const char *value)
+{
+	sort_key_t *keys;
+	const char *s, *e;
+	int size = 4;
+	int pos = 0;
+
+	keys = xnew(sort_key_t, size);
+
+	s = value;
+	while (1) {
+		char buf[32];
+		int i, len;
+
+		while (*s == ' ')
+			s++;
+
+		e = s;
+		while (*e && *e != ' ')
+			e++;
+
+		len = e - s;
+		if (len == 0)
+			break;
+		if (len > 31)
+			len = 31;
+
+		memcpy(buf, s, len);
+		buf[len] = 0;
+		s = e;
+
+		for (i = 0; ; i++) {
+			if (sort_key_map[i].str == NULL) {
+				error_msg("invalid sort key '%s'", buf);
+				free(keys);
+				return NULL;
+			}
+
+			if (strcmp(buf, sort_key_map[i].str) == 0)
+				break;
+		}
+		if (pos == size - 1) {
+			size *= 2;
+			keys = xrenew(sort_key_t, keys, size);
+		}
+		keys[pos++] = sort_key_map[i].key;
+	}
+	keys[pos] = SORT_INVALID;
+	return keys;
+}
+
+const char *sort_key_to_str(sort_key_t key)
+{
+	int i;
+	for (i = 0; sort_key_map[i].str; i++) {
+		if (sort_key_map[i].key == key)
+			return sort_key_map[i].str;
+	}
+	return NULL;
+}
+
+void sort_keys_to_str(const sort_key_t *keys, char *buf, size_t bufsize)
+{
+	int i, pos = 0;
+
+	for (i = 0; keys[i] != SORT_INVALID; i++) {
+		const char *key = sort_key_to_str(keys[i]);
+		int len = strlen(key);
+
+		if ((int)bufsize - pos - len - 2 < 0)
+			break;
+
+		memcpy(buf + pos, key, len);
+		pos += len;
+		buf[pos++] = ' ';
+	}
+	if (pos > 0)
+		pos--;
+	buf[pos] = 0;
 }

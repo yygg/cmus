@@ -22,6 +22,7 @@
 #include <time.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 struct track_info {
 	uint64_t uid;
@@ -35,7 +36,6 @@ struct track_info {
 	long bitrate;
 	char *codec;
 	char *codec_profile;
-	int ref;
 	char *filename;
 
 	int tracknumber;
@@ -130,6 +130,7 @@ void track_info_set_comments(struct track_info *ti, struct keyval *comments);
 
 void track_info_ref(struct track_info *ti);
 void track_info_unref(struct track_info *ti);
+bool track_info_unique_ref(struct track_info *ti);
 
 /*
  * returns: 1 if @ti has any of the following tags: artist, album, title
@@ -157,5 +158,9 @@ int track_info_matches_full(const struct track_info *ti, const char *text, unsig
 		unsigned int exclude_flags, int match_all_words);
 
 int track_info_cmp(const struct track_info *a, const struct track_info *b, const sort_key_t *keys);
+
+sort_key_t *parse_sort_keys(const char *value);
+const char *sort_key_to_str(sort_key_t key);
+void sort_keys_to_str(const sort_key_t *keys, char *buf, size_t bufsize);
 
 #endif

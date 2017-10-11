@@ -57,7 +57,7 @@ Sorted library view (2)
 	automatically sorted by user criteria.
 
 Playlist view (3)
-	Displays editable playlist with optional sorting.
+	Displays editable playlists with optional sorting.
 
 Play Queue view (4)
 	Displays queue of tracks which are played next. These tracks are
@@ -65,7 +65,7 @@ Play Queue view (4)
 
 Browser (5)
 	Directory browser.  In this view, music can be added to either the
-	library, playlist or queue from the filesystem.
+	library, marked playlist or queue from the filesystem.
 
 Filters view (6)
 	Lists user defined filters.
@@ -136,7 +136,7 @@ You can copy marked or selected tracks from views 1-5.
 copy tracks to the library (1-2)
 
 @li *y*
-copy tracks to the playlist (3)
+copy tracks to the marked playlist (3)
 
 @li *e*
 append tracks to the play queue (4)
@@ -175,7 +175,7 @@ aaa_mode & play_sorted & play_library | continue follow repeat shuffle
 @endpre
 
 NOTE: *aaa_mode* and *play_sorted* will be displayed only if *play_library* is
-*true* because these are meaningless when playing the playlist (view 3).
+*true* because these are meaningless when playing the playlists (view 3).
 
 Pressing *m*, *o*, *M*, *C*, *r* and *s* keys should make it easier to
 understand what all those fields mean.
@@ -200,6 +200,8 @@ x                           player-play
 z                           player-prev
 v                           player-stop
 ^L                          refresh
+/                           search-start
+?                           search-b-start
 n                           search-next
 N                           search-prev
 .                           seek +1m
@@ -214,6 +216,7 @@ r                           toggle repeat
 ^R                          toggle repeat_current
 t                           toggle show_remaining_time
 s                           toggle shuffle
+f                           toggle follow
 F                           push filter<space>
 L                           push live-filter<space>
 u                           update-cache
@@ -457,6 +460,19 @@ lqueue [NUM]
 mark <filter-expression>
 	Mark tracks in playlist and queue view by using a filter expression.
 
+pl-create <name>
+	Creates a new playlist.
+
+pl-export <filename>
+	Exports the currently selected playlist.
+
+pl-import [filename]
+	Imports a playlist into the playlist view. The argument can be omitted in
+	the browser view.
+
+pl-rename <name>
+	Renames the selected playlist.
+
 player-next (*b*)
 	Skip to the next track.
 
@@ -659,7 +675,7 @@ win-add-l (*a*)
 
 win-add-p (*y*)
 	Add the currently marked or selected track(s) (views 1-2, 4), or the
-	currently selected file or directory (view 5) to the playlist.
+	currently selected file or directory (view 5) to the marked playlist.
 
 	Analogous to *:add -p*
 
@@ -681,10 +697,10 @@ win-bottom (*G*, *end*)
 win-down [NUM] (*j*, *down*)
 	Goto down NUM (default 1) rows in the current window.
 
-win-half-page-down
+win-half-page-down (*^D*)
 	Goto down half a page in the current window.
 
-win-half-page-up
+win-half-page-up (*^U*)
 	Goto up half a page in the current window.
 
 win-mv-after (*p*)
@@ -718,8 +734,8 @@ win-page-up (*^B*, *page_up*)
 
 win-remove (*D*, *delete*)
 	Remove the selected entry.  For tracks no confirmations are made.  For
-	files (view 5), filters (view 6) and bindings (view 7) user has to
-	confirm the action.
+	playlists (view 3), files (view 5), filters (view 6) and bindings (view 7)
+	user has to confirm the action.
 
 win-scroll-down (*^E*)
 	Scroll current window one row downwards.
@@ -733,8 +749,9 @@ win-sel-cur (*i*)
 	1-3, does nothing in other views.
 
 win-toggle (*space*)
-	Expand albums in library view (1), mark tracks in views 2-4, toggle
-	selection of a filter in view 6, toggle variable value in view 7.
+	Expand albums in library view (1), mark tracks in views 2-4, set the marked
+	playlist in view 3, toggle selection of a filter in view 6, toggle variable
+	value in view 7.
 
 win-top (*g*, *home*)
 	Goto top of the current window.
@@ -906,6 +923,15 @@ color_win_title_fg (white) [`Color`]
 color_win_title_attr (default) [`Attributes`]
 	Attributes of window titles (topmost line of the screen).
 
+color_trackwin_album_bg (default) [`Color`]
+	Background color of the album row shown in the track window.
+
+color_trackwin_album_fg (default) [`Color`]
+	Foreground color of the album row shown in the track window.
+
+color_trackwin_album_attr (bold) [`Attributes`]
+	Attributes of the album row shown in the track window.
+
 confirm_run (true)
 	Ask for confirmation before executing *:run*
 
@@ -977,6 +1003,9 @@ icecast_default_charset (ISO-8859-1)
 
 	NOTE:  This is used only if the metadata is not valid UTF-8.
 
+lib_add_filter (`Filter`)
+	Apply filter when adding files to the library. See *FILTERS*.
+
 lib_sort (artist album discnumber tracknumber title filename) [`Sort Keys`]
 	Sort keys for the sorted library view (2).
 
@@ -987,7 +1016,7 @@ mouse (false)
 	old version of Ncurses.
 
 mpris (true)
-	Enable MPRIS support.
+	Enable MPRIS support. See *D-Bus Interface (MPRIS)*
 
 	NOTE: This flag has no effect if cmus was compiled without MPRIS support.
 
@@ -1072,11 +1101,17 @@ softvol_state (100 100)
 	option is not usually changed directly since *vol* command does same
 	thing if *softvol* is true.
 
+start_view (tree) [tree, sorted, playlist, queue, browser, filters, settings]
+	Specify the view that gets shown when cmus starts.
+
 status_display_program () [command]
 	This command, if not empty, is run every time cmus' status changes.
 	It can be used to display currently playing track on desktop
 	background or panel for example.  See
 	`/usr/share/doc/cmus/examples/cmus-status-display`.
+
+time_show_leading_zero (true)
+	Pad durations of less than 10 minutes with a leading 0
 
 wrap_search (true)
 	Controls whether the search wraps around the end.
@@ -1136,6 +1171,7 @@ Special Keys:
 	%d  %{duration}		@br
 	%f  %{path}		@br
 	%F  %{filename}		@br
+	    %{albumduration}    @br
 	    %{originaldate}	@br
 	    %{maxdate}		@br
 	    %{bpm}		@br
@@ -1280,7 +1316,7 @@ input.cdio.cddb_url
 	with "http://" (e.g.: http://freedb.musicbrainz.org:80/~cddb/cddb.cgi).
 	Set to an empty string to disable CDDB lookup completely.
 
-input.*.priority
+input.\*.priority
 	Sets the priority of the input plugin. If multiple plugins can play a
 	file, the plugin with the higher priority is chosen. If the priority is
 	0, the plugin is disabled.
@@ -1498,6 +1534,18 @@ USER
 USERNAME
 	Fallback for *USER*.
 
+@h1 D-Bus Interface (MPRIS)
+
+cmus provides a D-Bus interface following the Media Player Remote Interfacing Specification (MPRIS) v2:
+	https://www.freedesktop.org/wiki/Specifications/mpris-spec/
+
+It exposes the `/org/mpris/MediaPlayer2` object path with the interfaces
+`org.mpris.MediaPlayer2` and `org.mpris.MediaPlayer2.Player`.
+The unique bus name is `org.mpris.MediaPlayer2.cmus`.
+
+Metadata fields follow the naming convention of the specification:
+	https://www.freedesktop.org/wiki/Specifications/mpris-spec/metadata/
+Additionally, the `cmus:stream_title` field is exposed if appropriate.
 
 @h1 BUGS
 

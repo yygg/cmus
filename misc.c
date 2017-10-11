@@ -20,6 +20,9 @@
 #include "prog.h"
 #include "xmalloc.h"
 #include "xstrjoin.h"
+#include "ui_curses.h"
+#include "config/libdir.h"
+#include "config/datadir.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -33,7 +36,10 @@
 #include <pwd.h>
 
 const char *cmus_config_dir = NULL;
+const char *cmus_playlist_dir = NULL;
 const char *cmus_socket_path = NULL;
+const char *cmus_data_dir = NULL;
+const char *cmus_lib_dir = NULL;
 const char *home_dir = NULL;
 const char *user_name = NULL;
 
@@ -182,6 +188,30 @@ static char *get_non_empty_env(const char *name)
 	return xstrdup(val);
 }
 
+const char *get_filename(const char *path)
+{
+	const char *file = strrchr(path, '/');
+	if (!file)
+		file = path;
+	else
+		file++;
+	if (!*file)
+		return NULL;
+	return file;
+}
+
+static void move_old_playlist(void)
+{
+	char *default_playlist = xstrjoin(cmus_playlist_dir, "/default");
+	char *old_playlist = xstrjoin(cmus_config_dir, "/playlist.pl");
+	int rc = rename(old_playlist, default_playlist);
+	if (rc && errno != ENOENT)
+		die_errno("error: unable to move %s to playlist directory",
+				old_playlist);
+	free(default_playlist);
+	free(old_playlist);
+}
+
 int misc_init(void)
 {
 	char *xdg_runtime_dir = get_non_empty_env("XDG_RUNTIME_DIR");
@@ -222,6 +252,12 @@ int misc_init(void)
 	}
 	make_dir(cmus_config_dir);
 
+	cmus_playlist_dir = xstrjoin(cmus_config_dir, "/playlists");
+	int playlist_dir_is_new = dir_exists(cmus_playlist_dir) == 0;
+	make_dir(cmus_playlist_dir);
+	if (playlist_dir_is_new)
+		move_old_playlist();
+
 	cmus_socket_path = get_non_empty_env("CMUS_SOCKET");
 	if (cmus_socket_path == NULL) {
 		if (xdg_runtime_dir == NULL) {
@@ -230,6 +266,14 @@ int misc_init(void)
 			cmus_socket_path = xstrjoin(xdg_runtime_dir, "/cmus-socket");
 		}
 	}
+
+	cmus_lib_dir = getenv("CMUS_LIB_DIR");
+	if (!cmus_lib_dir)
+		cmus_lib_dir = LIBDIR "/cmus";
+
+	cmus_data_dir = getenv("CMUS_DATA_DIR");
+	if (!cmus_data_dir)
+		cmus_data_dir = DATADIR "/cmus";
 
 	free(xdg_runtime_dir);
 	return 0;

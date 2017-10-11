@@ -35,9 +35,7 @@
 #include "prog.h"
 #include "output.h"
 #include "input.h"
-#ifdef HAVE_CONFIG
-#include "config/datadir.h"
-#endif
+#include "xstrjoin.h"
 #include "track_info.h"
 #include "cache.h"
 #include "debug.h"
@@ -84,6 +82,8 @@ int auto_expand_albums_selcur = 1;
 int show_all_tracks = 1;
 int mouse = 0;
 int mpris = 1;
+int time_show_leading_zero = 1;
+int start_view = TREE_VIEW;
 
 int colors[NR_COLORS] = {
 	-1,
@@ -113,7 +113,10 @@ int colors[NR_COLORS] = {
 
 	COLOR_WHITE | BRIGHT,
 	COLOR_BLUE,
-	COLOR_WHITE | BRIGHT
+	COLOR_WHITE | BRIGHT,
+	-1,
+
+	-1,
 };
 
 int attrs[NR_ATTRS] = {
@@ -125,7 +128,9 @@ int attrs[NR_ATTRS] = {
 	A_NORMAL,
 	A_NORMAL,
 	A_NORMAL,
-	A_NORMAL
+	A_NORMAL,
+	A_NORMAL,
+	A_BOLD,
 };
 
 /* uninitialized option variables */
@@ -145,10 +150,11 @@ char *window_title_format = NULL;
 char *window_title_alt_format = NULL;
 char *id3_default_charset = NULL;
 char *icecast_default_charset = NULL;
+char *lib_add_filter = NULL;
 
-static void buf_int(char *buf, int val)
+static void buf_int(char *buf, int val, size_t size)
 {
-	snprintf(buf, OPTION_MAX_SIZE, "%d", val);
+	snprintf(buf, size, "%d", val);
 }
 
 static int parse_int(const char *buf, int minval, int maxval, int *val)
@@ -238,7 +244,7 @@ static const struct {
 	[FMT_PLAYLIST_VA]	= { "format_playlist_va"	, " %-21%A %3n. %t (%a)%= %y %d %{?X!=0?%3X ?    }"	},
 	[FMT_TITLE_ALT]		= { "altformat_title"		, "%f"							},
 	[FMT_TITLE]		= { "format_title"		, "%a - %l - %t (%y)"					},
-	[FMT_TRACKWIN_ALBUM]	= { "format_trackwin_album"	, " %l "						},
+	[FMT_TRACKWIN_ALBUM]	= { "format_trackwin_album"	, " %l %= %{albumduration} "				},
 	[FMT_TRACKWIN_ALT]	= { "altformat_trackwin"	, " %f%= %d "						},
 	[FMT_TRACKWIN]		= { "format_trackwin"		, "%3n. %t%= %y %d "					},
 	[FMT_TRACKWIN_VA]	= { "format_trackwin_va"	, "%3n. %t (%a)%= %y %d "				},
@@ -256,9 +262,9 @@ static const struct {
 
 /* callbacks for normal options {{{ */
 
-static void get_device(void *data, char *buf)
+static void get_device(void *data, char *buf, size_t size)
 {
-	strcpy(buf, cdda_device);
+	strscpy(buf, cdda_device, size);
 }
 
 static void set_device(void *data, const char *buf)
@@ -268,9 +274,11 @@ static void set_device(void *data, const char *buf)
 }
 
 #define SECOND_SIZE (44100 * 16 / 8 * 2)
-static void get_buffer_seconds(void *data, char *buf)
+static void get_buffer_seconds(void *data, char *buf, size_t size)
 {
-	buf_int(buf, (player_get_buffer_chunks() * CHUNK_SIZE + SECOND_SIZE / 2) / SECOND_SIZE);
+	int val = (player_get_buffer_chunks() * CHUNK_SIZE + SECOND_SIZE / 2) /
+		SECOND_SIZE;
+	buf_int(buf, val, size);
 }
 
 static void set_buffer_seconds(void *data, const char *buf)
@@ -281,9 +289,9 @@ static void set_buffer_seconds(void *data, const char *buf)
 		player_set_buffer_chunks((sec * SECOND_SIZE + CHUNK_SIZE / 2) / CHUNK_SIZE);
 }
 
-static void get_scroll_offset(void *data, char *buf)
+static void get_scroll_offset(void *data, char *buf, size_t size)
 {
-	buf_int(buf, scroll_offset);
+	buf_int(buf, scroll_offset, size);
 }
 
 static void set_scroll_offset(void *data, const char *buf)
@@ -294,9 +302,9 @@ static void set_scroll_offset(void *data, const char *buf)
 		scroll_offset = offset;
 }
 
-static void get_rewind_offset(void *data, char *buf)
+static void get_rewind_offset(void *data, char *buf, size_t size)
 {
-	buf_int(buf, rewind_offset);
+	buf_int(buf, rewind_offset, size);
 }
 
 static void set_rewind_offset(void *data, const char *buf)
@@ -307,14 +315,14 @@ static void set_rewind_offset(void *data, const char *buf)
 		rewind_offset = offset;
 }
 
-static void get_id3_default_charset(void *data, char *buf)
+static void get_id3_default_charset(void *data, char *buf, size_t size)
 {
-	strcpy(buf, id3_default_charset);
+	strscpy(buf, id3_default_charset, size);
 }
 
-static void get_icecast_default_charset(void *data, char *buf)
+static void get_icecast_default_charset(void *data, char *buf, size_t size)
 {
-	strcpy(buf, icecast_default_charset);
+	strscpy(buf, icecast_default_charset, size);
 }
 
 static void set_id3_default_charset(void *data, const char *buf)
@@ -329,141 +337,9 @@ static void set_icecast_default_charset(void *data, const char *buf)
 	icecast_default_charset = xstrdup(buf);
 }
 
-static const struct {
-	const char *str;
-	sort_key_t key;
-} sort_key_map[] = {
-	{ "artist",		SORT_ARTIST		},
-	{ "album",		SORT_ALBUM		},
-	{ "title",		SORT_TITLE		},
-	{ "play_count",		SORT_PLAY_COUNT		},
-	{ "tracknumber",	SORT_TRACKNUMBER	},
-	{ "discnumber",		SORT_DISCNUMBER		},
-	{ "date",		SORT_DATE		},
-	{ "originaldate",	SORT_ORIGINALDATE	},
-	{ "genre",		SORT_GENRE		},
-	{ "comment",		SORT_COMMENT		},
-	{ "albumartist",	SORT_ALBUMARTIST	},
-	{ "filename",		SORT_FILENAME		},
-	{ "filemtime",		SORT_FILEMTIME		},
-	{ "rg_track_gain",	SORT_RG_TRACK_GAIN	},
-	{ "rg_track_peak",	SORT_RG_TRACK_PEAK	},
-	{ "rg_album_gain",	SORT_RG_ALBUM_GAIN	},
-	{ "rg_album_peak",	SORT_RG_ALBUM_PEAK	},
-	{ "bitrate",		SORT_BITRATE		},
-	{ "codec",		SORT_CODEC		},
-	{ "codec_profile",	SORT_CODEC_PROFILE	},
-	{ "media",		SORT_MEDIA		},
-	{ "bpm",		SORT_BPM		},
-	{ "-artist",		REV_SORT_ARTIST		},
-	{ "-album",		REV_SORT_ALBUM		},
-	{ "-title",		REV_SORT_TITLE		},
-	{ "-play_count", 	REV_SORT_PLAY_COUNT	},
-	{ "-tracknumber",	REV_SORT_TRACKNUMBER	},
-	{ "-discnumber",	REV_SORT_DISCNUMBER	},
-	{ "-date",		REV_SORT_DATE		},
-	{ "-originaldate",	REV_SORT_ORIGINALDATE	},
-	{ "-genre",		REV_SORT_GENRE		},
-	{ "-comment",		REV_SORT_COMMENT	},
-	{ "-albumartist",	REV_SORT_ALBUMARTIST	},
-	{ "-filename",		REV_SORT_FILENAME	},
-	{ "-filemtime",		REV_SORT_FILEMTIME	},
-	{ "-rg_track_gain",	REV_SORT_RG_TRACK_GAIN	},
-	{ "-rg_track_peak",	REV_SORT_RG_TRACK_PEAK	},
-	{ "-rg_album_gain",	REV_SORT_RG_ALBUM_GAIN	},
-	{ "-rg_album_peak",	REV_SORT_RG_ALBUM_PEAK	},
-	{ "-bitrate",		REV_SORT_BITRATE	},
-	{ "-codec",		REV_SORT_CODEC		},
-	{ "-codec_profile",	REV_SORT_CODEC_PROFILE	},
-	{ "-media",		REV_SORT_MEDIA		},
-	{ "-bpm",		REV_SORT_BPM		},
-	{ NULL,                 SORT_INVALID            }
-};
-
-static sort_key_t *parse_sort_keys(const char *value)
+static void get_lib_sort(void *data, char *buf, size_t size)
 {
-	sort_key_t *keys;
-	const char *s, *e;
-	int size = 4;
-	int pos = 0;
-
-	keys = xnew(sort_key_t, size);
-
-	s = value;
-	while (1) {
-		char buf[32];
-		int i, len;
-
-		while (*s == ' ')
-			s++;
-
-		e = s;
-		while (*e && *e != ' ')
-			e++;
-
-		len = e - s;
-		if (len == 0)
-			break;
-		if (len > 31)
-			len = 31;
-
-		memcpy(buf, s, len);
-		buf[len] = 0;
-		s = e;
-
-		for (i = 0; ; i++) {
-			if (sort_key_map[i].str == NULL) {
-				error_msg("invalid sort key '%s'", buf);
-				free(keys);
-				return NULL;
-			}
-
-			if (strcmp(buf, sort_key_map[i].str) == 0)
-				break;
-		}
-		if (pos == size - 1) {
-			size *= 2;
-			keys = xrenew(sort_key_t, keys, size);
-		}
-		keys[pos++] = sort_key_map[i].key;
-	}
-	keys[pos] = SORT_INVALID;
-	return keys;
-}
-
-static const char *sort_key_to_str(sort_key_t key)
-{
-	int i;
-	for (i = 0; sort_key_map[i].str; i++) {
-		if (sort_key_map[i].key == key)
-			return sort_key_map[i].str;
-	}
-	return NULL;
-}
-
-static void sort_keys_to_str(const sort_key_t *keys, char *buf, size_t bufsize)
-{
-	int i, pos = 0;
-
-	for (i = 0; keys[i] != SORT_INVALID; i++) {
-		const char *key = sort_key_to_str(keys[i]);
-		int len = strlen(key);
-
-		if ((int)bufsize - pos - len - 2 < 0)
-			break;
-
-		memcpy(buf + pos, key, len);
-		pos += len;
-		buf[pos++] = ' ';
-	}
-	if (pos > 0)
-		pos--;
-	buf[pos] = 0;
-}
-
-static void get_lib_sort(void *data, char *buf)
-{
-	strcpy(buf, lib_editable.sort_str);
+	strscpy(buf, lib_editable.shared->sort_str, size);
 }
 
 static void set_lib_sort(void *data, const char *buf)
@@ -471,32 +347,29 @@ static void set_lib_sort(void *data, const char *buf)
 	sort_key_t *keys = parse_sort_keys(buf);
 
 	if (keys) {
-		editable_set_sort_keys(&lib_editable, keys);
-		sort_keys_to_str(keys, lib_editable.sort_str, sizeof(lib_editable.sort_str));
+		editable_shared_set_sort_keys(lib_editable.shared, keys);
+		editable_sort(&lib_editable);
+		sort_keys_to_str(keys, lib_editable.shared->sort_str,
+				sizeof(lib_editable.shared->sort_str));
 	}
 }
 
-static void get_pl_sort(void *data, char *buf)
+static void get_pl_sort(void *data, char *buf, size_t size)
 {
-	strcpy(buf, pl_editable.sort_str);
+	pl_get_sort_str(buf, size);
 }
 
 static void set_pl_sort(void *data, const char *buf)
 {
-	sort_key_t *keys = parse_sort_keys(buf);
-
-	if (keys) {
-		editable_set_sort_keys(&pl_editable, keys);
-		sort_keys_to_str(keys, pl_editable.sort_str, sizeof(pl_editable.sort_str));
-	}
+	pl_set_sort_str(buf);
 }
 
-static void get_output_plugin(void *data, char *buf)
+static void get_output_plugin(void *data, char *buf, size_t size)
 {
 	const char *value = op_get_current();
 
 	if (value)
-		strcpy(buf, value);
+		strscpy(buf, value, size);
 }
 
 static void set_output_plugin(void *data, const char *buf)
@@ -513,10 +386,10 @@ static void set_output_plugin(void *data, const char *buf)
 	}
 }
 
-static void get_passwd(void *data, char *buf)
+static void get_passwd(void *data, char *buf, size_t size)
 {
 	if (server_password)
-		strcpy(buf, server_password);
+		strscpy(buf, server_password, size);
 }
 
 static void set_passwd(void *data, const char *buf)
@@ -534,9 +407,9 @@ static void set_passwd(void *data, const char *buf)
 	}
 }
 
-static void get_replaygain_preamp(void *data, char *buf)
+static void get_replaygain_preamp(void *data, char *buf, size_t size)
 {
-	sprintf(buf, "%f", replaygain_preamp);
+	snprintf(buf, size, "%f", replaygain_preamp);
 }
 
 static void set_replaygain_preamp(void *data, const char *buf)
@@ -552,9 +425,9 @@ static void set_replaygain_preamp(void *data, const char *buf)
 	player_set_rg_preamp(val);
 }
 
-static void get_softvol_state(void *data, char *buf)
+static void get_softvol_state(void *data, char *buf, size_t size)
 {
-	sprintf(buf, "%d %d", soft_vol_l, soft_vol_r);
+	snprintf(buf, size, "%d %d", soft_vol_l, soft_vol_r);
 }
 
 static void set_softvol_state(void *data, const char *buf)
@@ -563,7 +436,7 @@ static void set_softvol_state(void *data, const char *buf)
 	char *ptr;
 	long int l, r;
 
-	strcpy(buffer, buf);
+	strscpy(buffer, buf, sizeof(buffer));
 	ptr = strchr(buffer, ' ');
 	if (!ptr)
 		goto err;
@@ -581,10 +454,10 @@ err:
 	error_msg("two integers in range 0..100 expected");
 }
 
-static void get_status_display_program(void *data, char *buf)
+static void get_status_display_program(void *data, char *buf, size_t size)
 {
 	if (status_display_program)
-		strcpy(buf, status_display_program);
+		strscpy(buf, status_display_program, size);
 }
 
 static void set_status_display_program(void *data, const char *buf)
@@ -599,9 +472,9 @@ static void set_status_display_program(void *data, const char *buf)
 
 /* callbacks for toggle options {{{ */
 
-static void get_auto_reshuffle(void *data, char *buf)
+static void get_auto_reshuffle(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[auto_reshuffle]);
+	strscpy(buf, bool_names[auto_reshuffle], size);
 }
 
 static void set_auto_reshuffle(void *data, const char *buf)
@@ -614,9 +487,9 @@ static void toggle_auto_reshuffle(void *data)
 	auto_reshuffle ^= 1;
 }
 
-static void get_follow(void *data, char *buf)
+static void get_follow(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[follow]);
+	strscpy(buf, bool_names[follow], size);
 }
 
 static void set_follow(void *data, const char *buf)
@@ -632,9 +505,9 @@ static void toggle_follow(void *data)
 	update_statusline();
 }
 
-static void get_continue(void *data, char *buf)
+static void get_continue(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[player_cont]);
+	strscpy(buf, bool_names[player_cont], size);
 }
 
 static void set_continue(void *data, const char *buf)
@@ -650,9 +523,9 @@ static void toggle_continue(void *data)
 	update_statusline();
 }
 
-static void get_repeat_current(void *data, char *buf)
+static void get_repeat_current(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[player_repeat_current]);
+	strscpy(buf, bool_names[player_repeat_current], size);
 }
 
 static void set_repeat_current(void *data, const char *buf)
@@ -672,9 +545,9 @@ static void toggle_repeat_current(void *data)
 	update_statusline();
 }
 
-static void get_confirm_run(void *data, char *buf)
+static void get_confirm_run(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[confirm_run]);
+	strscpy(buf, bool_names[confirm_run], size);
 }
 
 static void set_confirm_run(void *data, const char *buf)
@@ -691,9 +564,9 @@ const char * const view_names[NR_VIEWS + 1] = {
 	"tree", "sorted", "playlist", "queue", "browser", "filters", "settings", NULL
 };
 
-static void get_play_library(void *data, char *buf)
+static void get_play_library(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[play_library]);
+	strscpy(buf, bool_names[play_library], size);
 }
 
 static void set_play_library(void *data, const char *buf)
@@ -709,9 +582,9 @@ static void toggle_play_library(void *data)
 	update_statusline();
 }
 
-static void get_play_sorted(void *data, char *buf)
+static void get_play_sorted(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[play_sorted]);
+	strscpy(buf, bool_names[play_sorted], size);
 }
 
 static void set_play_sorted(void *data, const char *buf)
@@ -740,9 +613,9 @@ static void toggle_play_sorted(void *data)
 	update_statusline();
 }
 
-static void get_smart_artist_sort(void *data, char *buf)
+static void get_smart_artist_sort(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[smart_artist_sort]);
+	strscpy(buf, bool_names[smart_artist_sort], size);
 }
 
 static void set_smart_artist_sort(void *data, const char *buf)
@@ -757,9 +630,9 @@ static void toggle_smart_artist_sort(void *data)
 	tree_sort_artists();
 }
 
-static void get_display_artist_sort_name(void *data, char *buf)
+static void get_display_artist_sort_name(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[display_artist_sort_name]);
+	strscpy(buf, bool_names[display_artist_sort_name], size);
 }
 
 static void set_display_artist_sort_name(void *data, const char *buf)
@@ -778,9 +651,9 @@ const char * const aaa_mode_names[] = {
 	"all", "artist", "album", NULL
 };
 
-static void get_aaa_mode(void *data, char *buf)
+static void get_aaa_mode(void *data, char *buf, size_t size)
 {
-	strcpy(buf, aaa_mode_names[aaa_mode]);
+	strscpy(buf, aaa_mode_names[aaa_mode], size);
 }
 
 static void set_aaa_mode(void *data, const char *buf)
@@ -804,9 +677,9 @@ static void toggle_aaa_mode(void *data)
 	update_statusline();
 }
 
-static void get_repeat(void *data, char *buf)
+static void get_repeat(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[repeat]);
+	strscpy(buf, bool_names[repeat], size);
 }
 
 static void set_repeat(void *data, const char *buf)
@@ -831,9 +704,9 @@ static const char * const replaygain_names[] = {
 	"disabled", "track", "album", "track-preferred", "album-preferred", NULL
 };
 
-static void get_replaygain(void *data, char *buf)
+static void get_replaygain(void *data, char *buf, size_t size)
 {
-	strcpy(buf, replaygain_names[replaygain]);
+	strscpy(buf, replaygain_names[replaygain], size);
 }
 
 static void set_replaygain(void *data, const char *buf)
@@ -850,9 +723,9 @@ static void toggle_replaygain(void *data)
 	player_set_rg((replaygain + 1) % 5);
 }
 
-static void get_replaygain_limit(void *data, char *buf)
+static void get_replaygain_limit(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[replaygain_limit]);
+	strscpy(buf, bool_names[replaygain_limit], size);
 }
 
 static void set_replaygain_limit(void *data, const char *buf)
@@ -869,9 +742,9 @@ static void toggle_replaygain_limit(void *data)
 	player_set_rg_limit(replaygain_limit ^ 1);
 }
 
-static void get_resume(void *data, char *buf)
+static void get_resume(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[resume_cmus]);
+	strscpy(buf, bool_names[resume_cmus], size);
 }
 
 static void set_resume(void *data, const char *buf)
@@ -884,9 +757,9 @@ static void toggle_resume(void *data)
 	resume_cmus ^= 1;
 }
 
-static void get_show_hidden(void *data, char *buf)
+static void get_show_hidden(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[show_hidden]);
+	strscpy(buf, bool_names[show_hidden], size);
 }
 
 static void set_show_hidden(void *data, const char *buf)
@@ -904,9 +777,9 @@ static void toggle_show_hidden(void *data)
 
 static void set_show_all_tracks_int(int); /* defined below */
 
-static void get_auto_expand_albums_follow(void *data, char *buf)
+static void get_auto_expand_albums_follow(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[auto_expand_albums_follow]);
+	strscpy(buf, bool_names[auto_expand_albums_follow], size);
 }
 
 static void set_auto_expand_albums_follow_int(int value)
@@ -928,9 +801,9 @@ static void toggle_auto_expand_albums_follow(void *data)
 	set_auto_expand_albums_follow_int(!auto_expand_albums_follow);
 }
 
-static void get_auto_expand_albums_search(void *data, char *buf)
+static void get_auto_expand_albums_search(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[auto_expand_albums_search]);
+	strscpy(buf, bool_names[auto_expand_albums_search], size);
 }
 
 static void set_auto_expand_albums_search_int(int value)
@@ -952,9 +825,9 @@ static void toggle_auto_expand_albums_search(void *data)
 	set_auto_expand_albums_search_int(!auto_expand_albums_search);
 }
 
-static void get_auto_expand_albums_selcur(void *data, char *buf)
+static void get_auto_expand_albums_selcur(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[auto_expand_albums_selcur]);
+	strscpy(buf, bool_names[auto_expand_albums_selcur], size);
 }
 
 static void set_auto_expand_albums_selcur_int(int value)
@@ -977,9 +850,9 @@ static void toggle_auto_expand_albums_selcur(void *data)
 }
 
 
-static void get_show_all_tracks(void *data, char *buf)
+static void get_show_all_tracks(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[show_all_tracks]);
+	strscpy(buf, bool_names[show_all_tracks], size);
 }
 
 static void set_show_all_tracks_int(int value)
@@ -1011,9 +884,9 @@ static void toggle_show_all_tracks(void *data)
 	set_show_all_tracks_int(!show_all_tracks);
 }
 
-static void get_show_current_bitrate(void *data, char *buf)
+static void get_show_current_bitrate(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[show_current_bitrate]);
+	strscpy(buf, bool_names[show_current_bitrate], size);
 }
 
 static void set_show_current_bitrate(void *data, const char *buf)
@@ -1028,9 +901,9 @@ static void toggle_show_current_bitrate(void *data)
 	update_statusline();
 }
 
-static void get_show_playback_position(void *data, char *buf)
+static void get_show_playback_position(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[show_playback_position]);
+	strscpy(buf, bool_names[show_playback_position], size);
 }
 
 static void set_show_playback_position(void *data, const char *buf)
@@ -1046,9 +919,9 @@ static void toggle_show_playback_position(void *data)
 	update_statusline();
 }
 
-static void get_show_remaining_time(void *data, char *buf)
+static void get_show_remaining_time(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[show_remaining_time]);
+	strscpy(buf, bool_names[show_remaining_time], size);
 }
 
 static void set_show_remaining_time(void *data, const char *buf)
@@ -1064,9 +937,9 @@ static void toggle_show_remaining_time(void *data)
 	update_statusline();
 }
 
-static void get_set_term_title(void *data, char *buf)
+static void get_set_term_title(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[set_term_title]);
+	strscpy(buf, bool_names[set_term_title], size);
 }
 
 static void set_set_term_title(void *data, const char *buf)
@@ -1079,9 +952,9 @@ static void toggle_set_term_title(void *data)
 	set_term_title ^= 1;
 }
 
-static void get_shuffle(void *data, char *buf)
+static void get_shuffle(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[shuffle]);
+	strscpy(buf, bool_names[shuffle], size);
 }
 
 static void set_shuffle(void *data, const char *buf)
@@ -1101,9 +974,9 @@ static void toggle_shuffle(void *data)
 	update_statusline();
 }
 
-static void get_softvol(void *data, char *buf)
+static void get_softvol(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[soft_vol]);
+	strscpy(buf, bool_names[soft_vol], size);
 }
 
 static void do_set_softvol(int soft)
@@ -1130,9 +1003,9 @@ static void toggle_softvol(void *data)
 	do_set_softvol(soft_vol ^ 1);
 }
 
-static void get_wrap_search(void *data, char *buf)
+static void get_wrap_search(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[wrap_search]);
+	strscpy(buf, bool_names[wrap_search], size);
 }
 
 static void set_wrap_search(void *data, const char *buf)
@@ -1145,9 +1018,9 @@ static void toggle_wrap_search(void *data)
 	wrap_search ^= 1;
 }
 
-static void get_skip_track_info(void *data, char *buf)
+static void get_skip_track_info(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[skip_track_info]);
+	strscpy(buf, bool_names[skip_track_info], size);
 }
 
 static void set_skip_track_info(void *data, const char *buf)
@@ -1182,9 +1055,9 @@ void update_mouse(void)
 	}
 }
 
-static void get_mouse(void *data, char *buf)
+static void get_mouse(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[mouse]);
+	strscpy(buf, bool_names[mouse], size);
 }
 
 static void set_mouse(void *data, const char *buf)
@@ -1199,9 +1072,9 @@ static void toggle_mouse(void *data)
 	update_mouse();
 }
 
-static void get_mpris(void *data, char *buf)
+static void get_mpris(void *data, char *buf, size_t size)
 {
-	strcpy(buf, bool_names[mpris]);
+	strscpy(buf, bool_names[mpris], size);
 }
 
 static void set_mpris(void *data, const char *buf)
@@ -1212,6 +1085,47 @@ static void set_mpris(void *data, const char *buf)
 static void toggle_mpris(void *data)
 {
 	mpris ^= 1;
+}
+
+static void get_time_show_leading_zero(void *data, char *buf, size_t size)
+{
+	strscpy(buf, bool_names[time_show_leading_zero], size);
+}
+
+static void set_time_show_leading_zero(void *data, const char *buf)
+{
+	if (!parse_bool(buf, &time_show_leading_zero))
+		return;
+	update_statusline();
+}
+
+static void toggle_time_show_leading_zero(void *data)
+{
+	time_show_leading_zero ^= 1;
+	update_statusline();
+}
+
+static void get_lib_add_filter(void *data, char *buf, size_t size)
+{
+	strscpy(buf, lib_add_filter ? lib_add_filter : "", size);
+}
+
+static void set_lib_add_filter(void *data, const char *buf)
+{
+	struct expr *expr = NULL;
+
+	if (strlen(buf) != 0) {
+		/* parse expression if non-empty string given */
+		expr = expr_parse(buf);
+
+		if (!expr)
+			return;
+	}
+
+	free(lib_add_filter);
+	lib_add_filter = xstrdup(buf);
+
+	lib_set_add_filter(expr);
 }
 
 /* }}} */
@@ -1225,13 +1139,13 @@ static const char * const color_enum_names[1 + 8 * 2 + 1] = {
 	NULL
 };
 
-static void get_color(void *data, char *buf)
+static void get_color(void *data, char *buf, size_t size)
 {
 	int val = *(int *)data;
 	if (val < 16) {
-		strcpy(buf, color_enum_names[val + 1]);
+		strscpy(buf, color_enum_names[val + 1], size);
 	} else {
-		buf_int(buf, val);
+		buf_int(buf, val, size);
 	}
 }
 
@@ -1247,31 +1161,51 @@ static void set_color(void *data, const char *buf)
 	update_full();
 }
 
-static void get_attr(void *data, char *buf)
+static void get_start_view(void *data, char *buf, size_t size)
+{
+	strscpy(buf, view_names[start_view], size);
+}
+
+static void set_start_view(void *data, const char *buf)
+{
+	int view;
+
+	if (parse_enum(buf, 0, NR_VIEWS - 1, view_names, &view)) {
+		start_view = view;
+	}
+}
+
+static void get_attr(void *data, char *buf, size_t size)
 {
 	int attr = *(int *)data;
 
 	if (attr == 0) {
-		strcpy(buf, "default");
+		strscpy(buf, "default", size);
 		return;
 	}
 
+	const char *standout = "";
+	const char *underline = "";
+	const char *reverse = "";
+	const char *blink = "";
+	const char *bold = "";
+
 	if (attr & A_STANDOUT)
-		strcat(buf, "standout|");
-
+		standout = "standout|";
 	if (attr & A_UNDERLINE)
-		strcat(buf, "underline|");
-
+		underline = "underline|";
 	if (attr & A_REVERSE)
-		strcat(buf, "reverse|");
-
+		reverse = "reverse|";
 	if (attr & A_BLINK)
-		strcat(buf, "blink|");
-
+		blink = "blink|";
 	if (attr & A_BOLD)
-		strcat(buf, "bold|");
+		bold = "bold|";
 
-	buf[strlen(buf) - 1] = '\0';
+	size_t len = snprintf(buf, size, "%s%s%s%s%s", standout, underline, reverse,
+			blink, bold);
+
+	if (0 < len && len < size)
+		buf[len - 1] = 0;
 }
 
 static void set_attr(void *data, const char *buf)
@@ -1351,11 +1285,11 @@ static char **id_to_fmt(enum format_id id)
 	return NULL;
 }
 
-static void get_format(void *data, char *buf)
+static void get_format(void *data, char *buf, size_t size)
 {
 	char **fmtp = data;
 
-	strcpy(buf, *fmtp);
+	strscpy(buf, *fmtp, size);
 }
 
 static void set_format(void *data, const char *buf)
@@ -1427,6 +1361,9 @@ static const struct {
 	DT(skip_track_info)
 	DT(mouse)
 	DT(mpris)
+	DT(time_show_leading_zero)
+	DN(lib_add_filter)
+	DN(start_view)
 	{ NULL, NULL, NULL, NULL, 0 }
 };
 
@@ -1453,7 +1390,9 @@ static const char * const color_names[NR_COLORS] = {
 	"color_win_sel_bg",
 	"color_win_sel_fg",
 	"color_win_title_bg",
-	"color_win_title_fg"
+	"color_win_title_fg",
+	"color_trackwin_album_bg",
+	"color_trackwin_album_fg",
 };
 
 static const char * const attr_names[NR_ATTRS] = {
@@ -1466,7 +1405,8 @@ static const char * const attr_names[NR_ATTRS] = {
 	"color_win_inactive_cur_sel_attr",
 	"color_win_inactive_sel_attr",
 	"color_win_sel_attr",
-	"color_win_title_attr"
+	"color_win_title_attr",
+	"color_trackwin_album_attr",
 };
 
 LIST_HEAD(option_head);
@@ -1574,7 +1514,7 @@ void options_load(void)
 	/* load autosave config */
 	snprintf(filename, sizeof(filename), "%s/autosave", cmus_config_dir);
 	if (source_file(filename) == -1) {
-		const char *def = DATADIR "/cmus/rc";
+		char *def = xstrjoin(cmus_data_dir, "/rc");
 
 		if (errno != ENOENT)
 			error_msg("loading %s: %s", filename, strerror(errno));
@@ -1582,6 +1522,8 @@ void options_load(void)
 		/* load defaults */
 		if (source_file(def) == -1)
 			die_errno("loading %s", def);
+
+		free(def);
 	}
 
 	/* load optional static config */
@@ -1613,7 +1555,7 @@ void options_exit(void)
 		char buf[OPTION_MAX_SIZE];
 
 		buf[0] = 0;
-		opt->get(opt->data, buf);
+		opt->get(opt->data, buf, OPTION_MAX_SIZE);
 		fprintf(f, "set %s=%s\n", opt->name, buf);
 	}
 
@@ -1659,6 +1601,7 @@ struct resume {
 	int view;
 	char *live_filter;
 	char *browser_dir;
+	char *marked_pl;
 };
 
 static int handle_resume_line(void *data, const char *line)
@@ -1689,6 +1632,9 @@ static int handle_resume_line(void *data, const char *line)
 	} else if (strcmp(cmd, "browser-dir") == 0) {
 		free(resume->browser_dir);
 		resume->browser_dir = xstrdup(unescape(arg));
+	} else if (strcmp(cmd, "marked-pl") == 0) {
+		free(resume->marked_pl);
+		resume->marked_pl = xstrdup(unescape(arg));
 	}
 
 	free(arg);
@@ -1716,7 +1662,7 @@ void resume_load(void)
 		ti = old = cache_get_ti(resume.lib_filename, 0);
 		cache_unlock();
 		if (ti) {
-			lib_add_track(ti);
+			lib_add_track(ti, NULL);
 			track_info_unref(ti);
 			lib_store_cur_track(ti);
 			track_info_unref(ti);
@@ -1748,6 +1694,10 @@ void resume_load(void)
 	if (resume.browser_dir) {
 		browser_chdir(resume.browser_dir);
 		free(resume.browser_dir);
+	}
+	if (resume.marked_pl) {
+		pl_set_marked_pl_by_name(resume.marked_pl);
+		free(resume.marked_pl);
 	}
 }
 
@@ -1782,6 +1732,8 @@ void resume_exit(void)
 	if (lib_live_filter)
 		fprintf(f, "live-filter %s\n", escape(lib_live_filter));
 	fprintf(f, "browser-dir %s\n", escape(browser_dir));
+
+	fprintf(f, "marked-pl %s\n", escape(pl_marked_pl_name()));
 
 	fclose(f);
 

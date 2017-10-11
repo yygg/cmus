@@ -43,6 +43,16 @@
 
 #define N_ELEMENTS(array) (sizeof(array) / sizeof((array)[0]))
 
+struct slice {
+	void *ptr;
+	size_t len;
+};
+
+#define TO_SLICE(type, ...) ((struct slice) { \
+	.ptr = ((type[]){__VA_ARGS__}), \
+	.len = N_ELEMENTS(((type[]){__VA_ARGS__})), \
+})
+
 #define STRINGIZE_HELPER(x) #x
 #define STRINGIZE(x) STRINGIZE_HELPER(x)
 
@@ -117,9 +127,23 @@ static inline int strcmp0(const char *str1, const char *str2)
 	return strcmp(str1, str2);
 }
 
+static inline int is_space(const char ch)
+{
+	return (ch == ' ' || ch == '\t');
+}
+
 static inline int ends_with(const char *str, const char *suffix)
 {
 	return strstr(str, suffix) + strlen(suffix) == str + strlen(str);
+}
+
+static inline void strip_trailing_spaces(char *str)
+{
+	char *end = str + strlen(str);
+	while (end > str && is_space(*(end-1))) {
+		end--;
+	}
+	*end = 0;
 }
 
 static inline uint32_t hash_str(const char *s)
@@ -235,6 +259,19 @@ static inline uint32_t read_le32(const char *buf)
 	return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
 }
 
+static inline uint32_t read_le24(const char *buf)
+{
+	const unsigned char *b = (const unsigned char *)buf;
+
+	return b[0] | (b[1] << 8) | (b[2] << 16);
+}
+
+static inline int32_t read_le24i(const char *buf)
+{
+	uint32_t a = read_le24(buf); 
+	return (a & 0x800000) ? 0xFF000000 | a : a;
+}
+
 static inline uint16_t read_le16(const char *buf)
 {
 	const unsigned char *b = (const unsigned char *)buf;
@@ -292,6 +329,18 @@ static inline void clear_pipe(int pipe, size_t bytes)
 	char buf[128];
 	size_t bytes_to_read = min_u(sizeof(buf), bytes);
 	read(pipe, buf, bytes_to_read);
+}
+
+static inline ssize_t strscpy(char *dst, const char *src, size_t size)
+{
+	for (size_t i = 0; i < size; i++) {
+		dst[i] = src[i];
+		if (src[i] == 0)
+			return i;
+	}
+	if (size > 0)
+		dst[size - 1] = 0;
+	return -1;
 }
 
 #endif

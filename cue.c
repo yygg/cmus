@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2008-2013 Various Authors
- * Copyright (C) 2011 Gregory Petrosyan
+ * Copyright 2016 Various Authors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,385 +15,482 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "ip.h"
-#include "debug.h"
-#include "input.h"
-#include "utils.h"
-#include "comment.h"
-#include "xmalloc.h"
-#include "cue_utils.h"
-
-#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <ctype.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include <fcntl.h>
+#include <unistd.h>
 
+#include "cue.h"
+#include "xmalloc.h"
+#include "file.h"
+#include "list.h"
 
-struct cue_private {
-	struct input_plugin *child;
+#define ASCII_LOWER_TO_UPPER(c) ((c) & ~0x20)
 
-	char *cue_filename;
-	int track_n;
+struct cue_track_proto {
+	struct list_head node;
 
-	double start_offset;
-	double current_offset;
-	double end_offset;
+	uint32_t nr;
+	int32_t pregap;
+	int32_t postgap;
+	int32_t index0;
+	int32_t index1;
+
+	struct cue_meta meta;
 };
 
+struct cue_parser {
+	const char *src;
+	size_t len;
+	bool err;
 
-static int _parse_cue_url(const char *url, char **filename, int *track_n)
+	char *file;
+	struct list_head tracks;
+	size_t num_tracks;
+
+	struct cue_meta meta;
+};
+
+struct cue_switch {
+	const char *cmd;
+	void (*parser)(struct cue_parser *p);
+};
+
+static struct cue_track_proto *cue_proto_from_node(struct list_head *n)
 {
-	const char *slash;
-	long n;
-
-	if (!is_cue_url(url))
-		return 1;
-
-	url += 6;
-
-	slash = strrchr(url, '/');
-	if (!slash)
-		return 1;
-
-	if (str_to_int(slash + 1, &n) != 0)
-		return 1;
-
-	*filename = xstrndup(url, slash - url);
-	*track_n = n;
-	return 0;
+	return container_of(n, struct cue_track_proto, node);
 }
 
-
-static double _to_seconds(long v)
+static struct cue_track_proto *cue_last_proto(struct cue_parser *p)
 {
-	const int FRAMES_IN_SECOND = 75;
-
-	return (double)v / FRAMES_IN_SECOND;
+	if (p->num_tracks == 0)
+		return NULL;
+	return cue_proto_from_node(p->tracks.prev);
 }
 
-
-static char *_make_absolute_path(const char *abs_filename, const char *rel_filename)
+static inline void cue_consume(struct cue_parser *p)
 {
-	char *s;
-	const char *slash;
-	char buf[4096] = {0};
-
-	slash = strrchr(abs_filename, '/');
-	if (slash == NULL)
-		return xstrdup(rel_filename);
-
-	s = xstrndup(abs_filename, slash - abs_filename);
-	snprintf(buf, sizeof buf, "%s/%s", s, rel_filename);
-
-	free(s);
-	return xstrdup(buf);
+	p->len--;
+	p->src++;
 }
 
-
-static int cue_open(struct input_plugin_data *ip_data)
+static void cue_set_err(struct cue_parser *p)
 {
-	int rc;
-	FILE *cue;
-	Cd *cd;
-	Track *t;
-	char *child_filename;
-	struct cue_private *priv;
+	p->err = true;
+}
 
-	priv = xnew(struct cue_private, 1);
+static bool cue_str_eq(const char *a, size_t a_len, const char *b, size_t b_len)
+{
+	if (a_len != b_len)
+		return false;
+	for (size_t i = 0; i < a_len; i++) {
+		if (ASCII_LOWER_TO_UPPER(a[i]) != ASCII_LOWER_TO_UPPER(b[i]))
+			return false;
+	}
+	return true;
+}
 
-	rc = _parse_cue_url(ip_data->filename, &priv->cue_filename, &priv->track_n);
-	if (rc) {
-		rc = -IP_ERROR_INVALID_URI;
-		goto url_parse_failed;
+static void cue_skip_spaces(struct cue_parser *p)
+{
+	while (p->len > 0 && (*p->src == ' ' || *p->src == '\t'))
+		cue_consume(p);
+}
+
+static size_t cue_extract_token(struct cue_parser *p, const char **start)
+{
+	cue_skip_spaces(p);
+
+	bool quoted = p->len > 0 && *p->src == '"';
+	if (quoted)
+		cue_consume(p);
+
+	*start = p->src;
+
+	while (p->len > 0) {
+		char c = *p->src;
+		if (c == '\n' || c == '\r')
+			break;
+		if (quoted) {
+			if (c == '"')
+				break;
+		} else {
+			if (c == ' ' || c == '\t')
+				break;
+		}
+		cue_consume(p);
 	}
 
-	cue = fopen(priv->cue_filename, "r");
-	if (cue == NULL) {
-		rc = -IP_ERROR_ERRNO;
-		goto cue_open_failed;
+	if (quoted) {
+		size_t len = p->src - *start;
+		if (p->len > 0 && *p->src == '"')
+			cue_consume(p);
+		return len;
 	}
 
-	disable_stdio();
-	cd = cue_parse_file(cue);
-	enable_stdio();
-	if (cd == NULL) {
-		rc = -IP_ERROR_FILE_FORMAT;
-		goto cue_parse_failed;
+	return p->src - *start;
+}
+
+static void cue_skip_line(struct cue_parser *p)
+{
+	while (p->len > 0 && *p->src != '\n' && *p->src != '\r')
+		cue_consume(p);
+
+	if (p->len > 0) {
+		char c = *p->src;
+		cue_consume(p);
+		if (p->len > 0 && c == '\r' && *p->src == '\n')
+			cue_consume(p);
+	}
+}
+
+static char *cue_strdup(const char *start, size_t len)
+{
+	char *s = xnew(char, len + 1);
+	s[len] = 0;
+	memcpy(s, start, len);
+	return s;
+}
+
+static uint32_t cue_parse_int(struct cue_parser *p, const char *start, size_t len)
+{
+	uint32_t val = 0;
+	for (size_t i = 0; i < len; i++) {
+		if (!isdigit(start[i])) {
+			cue_set_err(p);
+			return 0;
+		}
+		val = val * 10 + start[i] - '0';
+	}
+	return val;
+}
+
+static void cue_parse_str(struct cue_parser *p, char **dst)
+{
+	const char *start;
+	size_t len = cue_extract_token(p, &start);
+	if (!*dst)
+		*dst = cue_strdup(start, len);
+}
+
+#define CUE_PARSE_STR(field) \
+	static void cue_parse_##field(struct cue_parser *p) \
+	{ \
+		struct cue_track_proto *t = cue_last_proto(p); \
+		if (t) \
+			cue_parse_str(p, &t->meta.field); \
+		else \
+			cue_parse_str(p, &p->meta.field); \
 	}
 
-	t = cd_get_track(cd, priv->track_n);
-	if (t == NULL) {
-		rc = -IP_ERROR_FILE_FORMAT;
-		goto cue_read_failed;
+CUE_PARSE_STR(performer)
+CUE_PARSE_STR(songwriter)
+CUE_PARSE_STR(title)
+CUE_PARSE_STR(genre)
+CUE_PARSE_STR(date)
+CUE_PARSE_STR(comment)
+
+static void cue_parse_file(struct cue_parser *p)
+{
+	cue_parse_str(p, &p->file);
+}
+
+static void cue_parse_track(struct cue_parser *p)
+{
+	const char *nr;
+	size_t len = cue_extract_token(p, &nr);
+
+	uint32_t d = cue_parse_int(p, nr, len);
+	if (p->err)
+		return;
+
+	struct cue_track_proto *t = xnew(struct cue_track_proto, 1);
+	*t = (struct cue_track_proto) {
+		.nr = d,
+		.pregap = -1,
+		.postgap = -1,
+		.index0 = -1,
+		.index1 = -1,
+	};
+
+	list_add_tail(&t->node, &p->tracks);
+	p->num_tracks++;
+}
+
+static uint32_t cue_parse_time(struct cue_parser *p, const char *start, size_t len)
+{
+	uint32_t vals[] = { 0, 0, 0 };
+	uint32_t *val = vals;
+	for (size_t i = 0; i < len; i++) {
+		if (start[i] == ':') {
+			if (val != &vals[2]) {
+				val++;
+				continue;
+			}
+			break;
+		}
+		if (!isdigit(start[i])) {
+			cue_set_err(p);
+			return 0;
+		}
+		*val = *val * 10 + start[i] - '0';
 	}
+	return (vals[0] * 60 + vals[1]) * 75 + vals[2];
+}
 
-	child_filename = (char *)track_get_filename(t);
-	if (child_filename == NULL) {
-		rc = -IP_ERROR_FILE_FORMAT;
-		goto cue_read_failed;
-	}
-	child_filename = _make_absolute_path(priv->cue_filename, child_filename);
+static void cue_parse_index(struct cue_parser *p)
+{
+	const char *nr;
+	size_t nr_len = cue_extract_token(p, &nr);
 
-	priv->child = ip_new(child_filename);
-	free(child_filename);
+	uint32_t d = cue_parse_int(p, nr, nr_len);
+	if (p->err || d > 1)
+		return;
 
-	rc = ip_open(priv->child);
-	if (rc)
-		goto ip_open_failed;
+	const char *offset_str;
+	size_t offset_len = cue_extract_token(p, &offset_str);
 
-	ip_setup(priv->child);
+	uint32_t offset = cue_parse_time(p, offset_str, offset_len);
+	if (p->err)
+		return;
 
-	priv->start_offset = _to_seconds(track_get_start(t));
-	priv->current_offset = priv->start_offset;
+	struct cue_track_proto *last = cue_last_proto(p);
+	if (!last)
+		return;
 
-	rc = ip_seek(priv->child, priv->start_offset);
-	if (rc)
-		goto ip_open_failed;
-
-#ifdef CONFIG_CUE2
-	if (track_get_length(t) != -1)
-#else
-	if (track_get_length(t) != 0)
-#endif
-		priv->end_offset = priv->start_offset + _to_seconds(track_get_length(t));
+	if (d == 0)
+		last->index0 = offset;
 	else
-		priv->end_offset = ip_duration(priv->child);
-
-	ip_data->fd = open(ip_get_filename(priv->child), O_RDONLY);
-	if (ip_data->fd == -1)
-		goto ip_open_failed;
-
-	ip_data->private = priv;
-	ip_data->sf = ip_get_sf(priv->child);
-	ip_get_channel_map(priv->child, ip_data->channel_map);
-
-	fclose(cue);
-	cd_delete(cd);
-	return 0;
-
-ip_open_failed:
-	ip_delete(priv->child);
-
-cue_read_failed:
-	cd_delete(cd);
-
-cue_parse_failed:
-	fclose(cue);
-
-cue_open_failed:
-	free(priv->cue_filename);
-
-url_parse_failed:
-	free(priv);
-
-	return rc;
+		last->index1 = offset;
 }
 
-
-static int cue_close(struct input_plugin_data *ip_data)
+static void cue_parse_cmd(struct cue_parser *p, struct cue_switch *s)
 {
-	struct cue_private *priv = ip_data->private;
+	const char *start;
+	size_t len = cue_extract_token(p, &start);
 
-	close(ip_data->fd);
-	ip_data->fd = -1;
-
-	ip_delete(priv->child);
-	free(priv->cue_filename);
-
-	free(priv);
-	ip_data->private = NULL;
-
-	return 0;
+	while (s->cmd) {
+		if (cue_str_eq(start, len, s->cmd, strlen(s->cmd))) {
+			s->parser(p);
+			return;
+		}
+		s++;
+	}
 }
 
-
-static int cue_read(struct input_plugin_data *ip_data, char *buffer, int count)
+static void cue_parse_rem(struct cue_parser *p)
 {
-	int rc;
-	sample_format_t sf;
-	double len;
-	double rem_len;
-	struct cue_private *priv = ip_data->private;
+	struct cue_switch cmds[] = {
+		{ "DATE",    cue_parse_date    },
+		{ "GENRE",   cue_parse_genre   },
+		{ "COMMENT", cue_parse_comment },
+		{ 0 },
+	};
 
-	if (priv->current_offset >= priv->end_offset)
-		return 0;
-
-	rc = ip_read(priv->child, buffer, count);
-	if (rc <= 0)
-		return rc;
-
-	sf = ip_get_sf(priv->child);
-	len = (double)rc / sf_get_second_size(sf);
-
-	rem_len = priv->end_offset - priv->current_offset;
-	priv->current_offset += len;
-
-	if (priv->current_offset >= priv->end_offset)
-		rc = (int)(rem_len * sf_get_rate(sf)) * sf_get_frame_size(sf);
-
-	return rc;
+	cue_parse_cmd(p, cmds);
 }
 
-
-static int cue_seek(struct input_plugin_data *ip_data, double offset)
+static void cue_parse_gap(struct cue_parser *p, bool post)
 {
-	struct cue_private *priv = ip_data->private;
-	double new_offset = priv->start_offset + offset;
+	const char *gap_str;
+	size_t gap_len = cue_extract_token(p, &gap_str);
 
-	if (new_offset > priv->end_offset)
-		new_offset = priv->end_offset;
+	uint32_t gap = cue_parse_time(p, gap_str, gap_len);
+	if (p->err)
+		return;
 
-	priv->current_offset = new_offset;
+	struct cue_track_proto *last = cue_last_proto(p);
+	if (!last)
+		return;
 
-	return ip_seek(priv->child, new_offset);
+	if (post)
+		last->postgap = gap;
+	else
+		last->pregap = gap;
 }
 
-
-static int cue_read_comments(struct input_plugin_data *ip_data, struct keyval **comments)
+static void cue_parse_pregap(struct cue_parser *p)
 {
-	int rc;
-	FILE *cue;
-	Cd *cd;
-	Rem *cd_rem;
-	Cdtext *cd_cdtext;
-	Track *t;
-	Rem *track_rem;
-	Cdtext *track_cdtext;
-	const char *val;
-	char buf[32] = {0};
-	GROWING_KEYVALS(c);
-	struct cue_private *priv = ip_data->private;
+	cue_parse_gap(p, false);
+}
 
-	cue = fopen(priv->cue_filename, "r");
-	if (cue == NULL) {
-		rc = -IP_ERROR_ERRNO;
-		goto cue_open_failed;
+static void cue_parse_postgap(struct cue_parser *p)
+{
+	cue_parse_gap(p, true);
+}
+
+static void cue_parse_line(struct cue_parser *p)
+{
+	struct cue_switch cmds[] = {
+		{ "FILE",       cue_parse_file       },
+		{ "PERFORMER",  cue_parse_performer  },
+		{ "SONGWRITER", cue_parse_songwriter },
+		{ "TITLE",      cue_parse_title      },
+		{ "TRACK",      cue_parse_track      },
+		{ "INDEX",      cue_parse_index      },
+		{ "REM",        cue_parse_rem        },
+		{ "PREGAP",     cue_parse_pregap     },
+		{ "POSTGAP",    cue_parse_postgap    },
+		{ 0 },
+	};
+
+	cue_parse_cmd(p, cmds);
+	cue_skip_line(p);
+}
+
+static void cue_post_process(struct cue_parser *p)
+{
+	if (!p->file || p->num_tracks == 0) {
+		cue_set_err(p);
+		return;
 	}
 
-	disable_stdio();
-	cd = cue_parse_file(cue);
-	enable_stdio();
-	if (cd == NULL) {
-		rc = -IP_ERROR_FILE_FORMAT;
-		goto cue_parse_failed;
+	struct cue_track_proto *t;
+
+	int32_t last = -1;
+
+	list_for_each_entry(t, &p->tracks, node) {
+		if (last != -1 && t->nr != last + 1) {
+			cue_set_err(p);
+			return;
+		}
+		last = t->nr;
 	}
 
-	t = cd_get_track(cd, priv->track_n);
-	if (t == NULL) {
-		rc = -IP_ERROR_FILE_FORMAT;
-		goto get_track_failed;
+	last = -1;
+
+	list_for_each_entry(t, &p->tracks, node) {
+		if (t->index0 == -1 && t->index1 == -1) {
+			cue_set_err(p);
+			return;
+		}
+		if (t->index0 == -1 || t->index1 == -1) {
+			int32_t pregap = t->pregap != -1 ? t->pregap : 0;
+			if (t->index1 != -1)
+				t->index0 = t->index1 - pregap;
+			else
+				t->index1 = t->index0 + pregap;
+		}
+		if (last != -1 && t->index0 < last) {
+			cue_set_err(p);
+			return;
+		}
+		int32_t postgap = t->postgap != -1 ? t->postgap : 0;
+		last = t->index1 + postgap;
+	}
+}
+
+static void cue_meta_move(struct cue_meta *l, struct cue_meta *r)
+{
+	*l = *r;
+	*r = (struct cue_meta) { 0 };
+}
+
+static struct cue_sheet *cue_parser_to_sheet(struct cue_parser *p)
+{
+	struct cue_sheet *s = xnew(struct cue_sheet, 1);
+
+	s->file = p->file;
+	p->file = NULL;
+
+	s->tracks = xnew(struct cue_track, p->num_tracks);
+	s->num_tracks = p->num_tracks;
+	s->track_base = cue_last_proto(p)->nr + 1 - p->num_tracks;
+
+	cue_meta_move(&s->meta, &p->meta);
+
+	size_t idx = 0;
+	struct cue_track_proto *t, *prev;
+	list_for_each_entry(t, &p->tracks, node) {
+		s->tracks[idx].offset = t->index1 / 75.0;
+		s->tracks[idx].length = -1;
+
+		if (idx > 0) {
+			int32_t postgap = prev->postgap != -1 ? prev->postgap : 0;
+			s->tracks[idx - 1].length =
+				(t->index0 - prev->index1 - postgap) / 75.0;
+		}
+
+		cue_meta_move(&s->tracks[idx].meta, &t->meta);
+
+		prev = t;
+		idx++;
 	}
 
-	snprintf(buf, sizeof buf, "%d", priv->track_n);
-	comments_add_const(&c, "tracknumber", buf);
+	return s;
+}
 
-	cd_rem = cd_get_rem(cd);
-	cd_cdtext = cd_get_cdtext(cd);
-	track_rem = track_get_rem(t);
-	track_cdtext = track_get_cdtext(t);
+static void cue_meta_free(struct cue_meta *m)
+{
+	free(m->performer);
+	free(m->songwriter);
+	free(m->title);
+	free(m->genre);
+	free(m->date);
+	free(m->comment);
+}
 
-	val = cdtext_get(PTI_TITLE, track_cdtext);
-	if (val != NULL)
-		comments_add_const(&c, "title", val);
-
-	val = cdtext_get(PTI_TITLE, cd_cdtext);
-	if (val != NULL)
-		comments_add_const(&c, "album", val);
-
-	val = cdtext_get(PTI_PERFORMER, track_cdtext);
-	if (val != NULL)
-		comments_add_const(&c, "artist", val);
-
-	val = cdtext_get(PTI_PERFORMER, cd_cdtext);
-	if (val != NULL)
-		comments_add_const(&c, "albumartist", val);
-
-	val = rem_get(REM_DATE, track_rem);
-	if (val != NULL) {
-		comments_add_const(&c, "date", val);
-	} else {
-		val = rem_get(REM_DATE, cd_rem);
-		if (val != NULL)
-			comments_add_const(&c, "date", val);
+static void cue_parser_free(struct cue_parser *p)
+{
+	struct cue_track_proto *t, *next;
+	list_for_each_entry_safe(t, next, &p->tracks, node) {
+		cue_meta_free(&t->meta);
+		free(t);
 	}
 
-	/*
-	 * TODO:
-	 * - replaygain REMs
-	 * - genre?
-	 */
-
-	keyvals_terminate(&c);
-	*comments = c.keyvals;
-
-	cd_delete(cd);
-	fclose(cue);
-	return 0;
-
-get_track_failed:
-	cd_delete(cd);
-
-cue_parse_failed:
-	fclose(cue);
-
-cue_open_failed:
-	return rc;
+	free(p->file);
+	cue_meta_free(&p->meta);
 }
 
-
-static int cue_duration(struct input_plugin_data *ip_data)
+struct cue_sheet *cue_parse(const char *src, size_t len)
 {
-	struct cue_private *priv = ip_data->private;
+	struct cue_sheet *res = NULL;
 
-	return priv->end_offset - priv->start_offset;
+	struct cue_parser p = {
+		.src = src,
+		.len = len,
+	};
+	list_init(&p.tracks);
+
+	while (p.len > 0 && !p.err)
+		cue_parse_line(&p);
+
+	if (p.err)
+		goto out;
+
+	cue_post_process(&p);
+
+	if (p.err)
+		goto out;
+
+	res = cue_parser_to_sheet(&p);
+
+out:
+	cue_parser_free(&p);
+	return res;
 }
 
-
-static long cue_bitrate(struct input_plugin_data *ip_data)
+struct cue_sheet *cue_from_file(const char *file)
 {
-	struct cue_private *priv = ip_data->private;
-
-	return ip_bitrate(priv->child);
+	ssize_t size;
+	char *buf = mmap_file(file, &size);
+	if (size == -1)
+		return NULL;
+	struct cue_sheet *rv = cue_parse(buf, size);
+	munmap(buf, size);
+	return rv;
 }
 
-
-static long cue_current_bitrate(struct input_plugin_data *ip_data)
+void cue_free(struct cue_sheet *s)
 {
-	struct cue_private *priv = ip_data->private;
+	free(s->file);
 
-	return ip_current_bitrate(priv->child);
+	for (size_t i = 0; i < s->num_tracks; i++)
+		cue_meta_free(&s->tracks[i].meta);
+	free(s->tracks);
+
+	cue_meta_free(&s->meta);
+	free(s);
 }
-
-
-static char *cue_codec(struct input_plugin_data *ip_data)
-{
-	struct cue_private *priv = ip_data->private;
-
-	return ip_codec(priv->child);
-}
-
-
-static char *cue_codec_profile(struct input_plugin_data *ip_data)
-{
-	struct cue_private *priv = ip_data->private;
-
-	return ip_codec_profile(priv->child);
-}
-
-
-const struct input_plugin_ops ip_ops = {
-	.open            = cue_open,
-	.close           = cue_close,
-	.read            = cue_read,
-	.seek            = cue_seek,
-	.read_comments   = cue_read_comments,
-	.duration        = cue_duration,
-	.bitrate         = cue_bitrate,
-	.bitrate_current = cue_current_bitrate,
-	.codec           = cue_codec,
-	.codec_profile   = cue_codec_profile,
-};
-
-const int ip_priority = 50;
-const char * const ip_extensions[] = { NULL };
-const char * const ip_mime_types[] = { "application/x-cue", NULL };
-const struct input_plugin_opt ip_options[] = { { NULL } };
-const unsigned ip_abi_version = IP_ABI_VERSION;

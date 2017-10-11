@@ -10,6 +10,7 @@ bind common + vol +10%
 bind common , seek -1m
 bind common - vol -10%
 bind common . seek +1m
+bind common / search-start
 bind common 1 view tree
 bind common 2 view sorted
 bind common 3 view playlist
@@ -18,6 +19,7 @@ bind common 5 view browser
 bind common 6 view filters
 bind common 7 view settings
 bind common = vol +10%
+bind common ? search-b-start
 bind common C toggle continue
 bind common D win-remove
 bind common E win-add-Q
@@ -31,9 +33,11 @@ bind common P win-mv-before
 bind common [ vol +1% +0
 bind common ] vol +0 +1%
 bind common ^B win-page-up
+bind common ^U win-half-page-up
 bind common ^C echo Type :quit<enter> to exit cmus.
 bind common ^E win-scroll-down
 bind common ^F win-page-down
+bind common ^D win-half-page-down
 bind common ^L refresh
 bind common ^R toggle repeat_current
 bind common ^Y win-scroll-up

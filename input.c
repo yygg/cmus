@@ -33,9 +33,7 @@
 #include "debug.h"
 #include "ui_curses.h"
 #include "locking.h"
-#ifdef HAVE_CONFIG
-#include "config/libdir.h"
-#endif
+#include "xstrjoin.h"
 
 #include <unistd.h>
 #include <stdbool.h>
@@ -95,7 +93,7 @@ struct ip {
 	const struct input_plugin_opt *options;
 };
 
-static const char * const plugin_dir = LIBDIR "/cmus/ip";
+static const char *plugin_dir;
 static LIST_HEAD(ip_head);
 
 /* protects ip->priority and ip_head */
@@ -497,6 +495,7 @@ void ip_load_plugins(void)
 	DIR *dir;
 	struct dirent *d;
 
+	plugin_dir = xstrjoin(cmus_lib_dir, "/ip");
 	dir = opendir(plugin_dir);
 	if (dir == NULL) {
 		error_msg("couldn't open directory `%s': %s", plugin_dir, strerror(errno));
@@ -864,14 +863,14 @@ static void set_ip_option(void *data, const char *val)
 		option_error(rc);
 }
 
-static void get_ip_option(void *data, char *buf)
+static void get_ip_option(void *data, char *buf, size_t size)
 {
 	const struct input_plugin_opt *ipo = data;
 	char *val = NULL;
 
 	ipo->get(&val);
 	if (val) {
-		strcpy(buf, val);
+		strscpy(buf, val, size);
 		free(val);
 	}
 }
@@ -907,11 +906,11 @@ static void set_ip_priority(void *data, const char *val)
 	ip_unlock();
 }
 
-static void get_ip_priority(void *data, char *val)
+static void get_ip_priority(void *data, char *val, size_t size)
 {
 	const struct ip *ip = data;
 	ip_rdlock();
-	snprintf(val, OPTION_MAX_SIZE, "%d", ip->priority);
+	snprintf(val, size, "%d", ip->priority);
 	ip_unlock();
 }
 
